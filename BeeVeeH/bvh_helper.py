@@ -1,7 +1,8 @@
-import bvh as BVHLIB
+import BeeVeeH.bvh as BVHLIB
 import math
 import copy
 import numpy as np
+from collections import Iterable
 
 class BVHChannel(object):
     ChannelTransformMatrixMap = {
@@ -44,15 +45,21 @@ class BVHChannel(object):
     def str(self):
         return 'Channel({name}) = {value}'.format(name=self.name, value=self.value)
 
+
 class BVHNode(object):
-    def __init__(self, name, offsets, channel_names, children, weight=1):
+    def __init__(self, key, name, offsets, channel_names, children, weight=1):
         super().__init__()
+        self.key = key
         self.name = name
         self.children = children # []
         self.channels = [BVHChannel(cn) for cn in channel_names] # []
         self.offsets = offsets # x, y, z
         # weight for calculate frame-frame distance
         self.weight = weight
+
+        self.coordinates = []
+        self.channelIndex = []
+        self.trans = []
 
     def search_node(self, name):
         if self.name == name:
@@ -62,6 +69,11 @@ class BVHNode(object):
             if result:
                 return result
         return None
+
+    def filter(self, key):
+        for child in self.children:
+            if child.key == key:
+                yield child
 
     def __load_frame(self, frame_data_array):
         ''' 
@@ -78,7 +90,7 @@ class BVHNode(object):
         self.__load_frame(frame_data_array)
 
     def apply_transformation(self, parent_tran_matrix=np.identity(4)):
-        self.coordinates = np.zeros((3,1))
+        self.coordinates = np.zeros((3, 1))
         local_translation = np.array([[1, 0, 0, self.offsets[0]],
                                      [0, 1, 0, self.offsets[1]],
                                      [0, 0, 1, self.offsets[2]],
@@ -88,6 +100,7 @@ class BVHNode(object):
         tran_matrix = np.dot(tran_matrix, local_translation)
         for channel in self.channels:
             tran_matrix = np.dot(tran_matrix, channel.matrix())
+        self.trans = tran_matrix
         self.coordinates = np.dot(tran_matrix, np.append(self.coordinates, [[1]], axis=0))[:3]
         for child in self.children:
             child.apply_transformation(tran_matrix)
@@ -131,25 +144,42 @@ class BVHNode(object):
 
 def parse_bvh_node(bvhlib_node):
     '''This function parses object from bvh-python (https://github.com/20tab/bvh-python)'''
+    key = bvhlib_node.value[0]
     name = bvhlib_node.name
     offsets = [float(f) for f in bvhlib_node.children[0].value[1:]]
     channel_names = []
     for channels in bvhlib_node.filter('CHANNELS'):
         channel_names = [c for c in channels.value[2:]]
     children = []
-    for c in bvhlib_node.filter('JOINT'):
+    for c in __filter_bvh_keys__(bvhlib_node, ['JOINT', 'End']):
         children.append(parse_bvh_node(c))
-    node = BVHNode(name, offsets,
-                   channel_names, children)
+    node = BVHNode(key, name, offsets, channel_names, children)
     return node
 
-def loads(s):
-    bvhlib = BVHLIB.Bvh(s)
-    root = parse_bvh_node(bvhlib.get_joints()[0])
-    return root, [[float(f) for f in frame] for frame in bvhlib.frames], bvhlib.frame_time
+
+def __filter_bvh_keys__(bvhNode, keys):
+    for child in bvhNode.children:
+        if isinstance(keys, Iterable):
+            if child.value[0] in keys:
+                yield child
+        elif child.value[0] == keys:
+            yield child
+
 
 def load(file_path):
+    # open the *.bvh file
     with open(file_path, 'r') as f:
-        return loads(f.read())
-        
+        bvhlib = BVHLIB.Bvh(f.read())
+
+    joints = []
+
+    def iterate_joints(joint):
+        joints.append(joint)
+        for child in __filter_bvh_keys__(joint, ['JOINT', 'End']):
+            iterate_joints(child)
+
+    iterate_joints(next(bvhlib.root.filter('ROOT')))
+
+    root = parse_bvh_node(joints[0])
+    return root, [[float(f) for f in frame] for frame in bvhlib.frames], bvhlib.frame_time
 
